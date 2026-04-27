@@ -3,9 +3,9 @@
 <head>
     <title>WebScreen Lite Viewer</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
+        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
         video { width: 100%; max-width: 800px; min-height: 450px; background: #000; border: 2px solid #333; border-radius: 12px; }
-        .btn { padding: 15px 30px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; transition: background 0.3s; }
+        .btn { padding: 15px 30px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; }
         #status { color: #ff9800; font-weight: bold; margin: 15px; padding: 10px; background: #1e1e1e; display: inline-block; border-radius: 20px; }
     </style>
 </head>
@@ -15,13 +15,13 @@
     <br>
     <video id="remoteVideo" autoplay playsinline></video>
     <br>
-    <button class="btn" style="background:#4CAF50" onclick="trigger('START_STREAM')">START STREAM</button>
-    <button class="btn" style="background:#f44336" onclick="trigger('STOP_STREAM')">STOP STREAM</button>
+    <button class="btn" style="background:#4CAF50" onclick="trigger('START_STREAM')">START MONITORING</button>
+    <button class="btn" style="background:#f44336" onclick="trigger('STOP_STREAM')">STOP MONITORING</button>
     <button class="btn" style="background:#2196F3" onclick="document.getElementById('remoteVideo').muted = false">UNMUTE AUDIO</button>
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-app.js";
-        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
+        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where, deleteDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
 
         // --- PASTE YOUR FIREBASE CONFIG HERE ---
         const firebaseConfig = {
@@ -50,7 +50,11 @@
             pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
-                    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+                    { 
+                        urls: "turn:openrelay.metered.ca:443?transport=tcp", 
+                        username: "openrelayproject", 
+                        credential: "openrelayproject" 
+                    }
                 ]
             });
 
@@ -63,24 +67,34 @@
             pc.onicecandidate = (e) => {
                 if (e.candidate) {
                     addDoc(collection(db, "sessions", sessionId, "candidates"), {
-                        candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, 
-                        sdpMLineIndex: e.candidate.sdpMLineIndex, origin: "web"
+                        candidate: e.candidate.candidate, 
+                        sdpMid: e.candidate.sdpMid, 
+                        sdpMLineIndex: e.candidate.sdpMLineIndex, 
+                        origin: "web"
                     });
                 }
             };
 
             pc.oniceconnectionstatechange = () => {
-                document.getElementById('status').innerText = "ICE: " + pc.iceConnectionState.toUpperCase();
+                const s = pc.iceConnectionState;
+                document.getElementById('status').innerText = "ICE: " + s.toUpperCase();
+                if (s === "failed" || s === "disconnected") {
+                    document.getElementById('status').style.color = "#f44336";
+                }
             };
         }
 
         window.trigger = async (cmd) => {
             const statusBox = document.getElementById('status');
             if (cmd === 'START_STREAM') {
-                statusBox.innerText = "RESETTING CONNECTION...";
+                statusBox.innerText = "REQUESTING NEW STREAM...";
                 initPeerConnection();
-                // Clear old signaling data to force Redmi to send a NEW offer
-                await updateDoc(sessionRef, { command: cmd, offer: null, answer: null });
+                // Clear signaling and set command to START
+                await updateDoc(sessionRef, { 
+                    command: cmd, 
+                    offer: null, 
+                    answer: null 
+                });
             } else {
                 statusBox.innerText = "STOPPING...";
                 await updateDoc(sessionRef, { command: cmd });
@@ -89,10 +103,11 @@
             }
         };
 
-        // Listen for Offer
+        // SIGNALING: LISTEN FOR OFFER
         onSnapshot(sessionRef, async (snap) => {
             const data = snap.data();
             if (data?.offer && pc && !pc.currentRemoteDescription) {
+                console.log("Offer received from Redmi");
                 await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
@@ -100,13 +115,14 @@
                 remoteSet = true;
                 while(buffer.length > 0) pc.addIceCandidate(new RTCIceCandidate(buffer.shift()));
             }
+            
             if (data?.command === "IDLE") {
                 document.getElementById('status').innerText = "REDMI STATUS: IDLE";
                 document.getElementById('status').style.color = "#ff9800";
             }
         });
 
-        // Listen for Candidates
+        // SIGNALING: LISTEN FOR CANDIDATES
         onSnapshot(query(collection(db, "sessions", sessionId, "candidates"), where("origin", "==", "android")), (snap) => {
             snap.docChanges().forEach(change => {
                 if (change.type === "added") {
@@ -117,7 +133,6 @@
             });
         });
 
-        // Start initial state
         initPeerConnection();
     </script>
 </body>
