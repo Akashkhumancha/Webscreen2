@@ -3,9 +3,9 @@
 <head>
     <title>WebScreen Lite Pro Viewer</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
         video { width: 100%; max-width: 800px; min-height: 450px; background: #000; border: 2px solid #333; border-radius: 12px; }
-        .btn { padding: 15px 30px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; }
+        .btn { padding: 15px 35px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; font-size: 16px; }
         #status { color: #ff9800; font-weight: bold; margin: 15px; padding: 10px; background: #1e1e1e; display: inline-block; border-radius: 20px; }
     </style>
 </head>
@@ -25,7 +25,6 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-app.js";
         import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
 
-        // --- PASTE YOUR FIREBASE CONFIG HERE ---
         const firebaseConfig = {
             apiKey: "AIzaSyCR--mIMXA96W4CtXPq1KxYptWhKNan5Dg",
             authDomain: "webscreenlite.firebaseapp.com",
@@ -52,7 +51,8 @@
             pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
-                    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+                    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+                    { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" }
                 ]
             });
 
@@ -79,55 +79,44 @@
             if (cmd === 'START_STREAM') {
                 statusBox.innerText = "RESETTING SESSION...";
                 initPeerConnection();
-                // Kill current session on Android and clear signaling
-                await updateDoc(sessionRef, { command: "STOP_STREAM" });
-                setTimeout(async () => {
-                    await updateDoc(sessionRef, { command: "START_STREAM", offer: null, answer: null });
-                }, 1000);
+                // Clear signaling to force Redmi to send a brand NEW offer
+                await updateDoc(sessionRef, { command: cmd, offer: null, answer: null });
             } else {
                 statusBox.innerText = "STOPPING...";
                 await updateDoc(sessionRef, { command: "STOP_STREAM" });
                 if(pc) pc.close();
+                document.getElementById('remoteVideo').srcObject = null;
             }
         };
 
+        // AUTO-RESET ON RELOAD
         async function handleReload() {
+            console.log("Reload detected. Clearing signaling...");
             initPeerConnection();
             document.getElementById('status').innerText = "RECONNECTING...";
-            // 1. Force Redmi to Stop current connection
-            await updateDoc(sessionRef, { command: "STOP_STREAM" });
-            // 2. Wipe signaling data
-            await updateDoc(sessionRef, { offer: null, answer: null });
-            // 3. Request fresh start after buffer
-            setTimeout(async () => {
-                await updateDoc(sessionRef, { command: "START_STREAM" });
-            }, 1500);
+            
+            // Wiping these fields is the "Signal" for Android to restart
+            await updateDoc(sessionRef, { 
+                offer: null, 
+                answer: null, 
+                command: "START_STREAM" 
+            });
         }
 
         onSnapshot(sessionRef, async (snap) => {
             const data = snap.data();
             
-            // CASE-INSENSITIVE OFFER HANDLING
             if (data?.offer && pc && !pc.currentRemoteDescription) {
-                console.log("Offer detected:", data.offer.type);
-                
-                const offerDesc = new RTCSessionDescription({
-                    type: data.offer.type.toLowerCase(), // Fix for "OFFER" casing
+                console.log("Offer received from Android");
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: data.offer.type.toLowerCase(),
                     sdp: data.offer.sdp
-                });
-
-                await pc.setRemoteDescription(offerDesc);
+                }));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
-                
-                await updateDoc(sessionRef, { 
-                    answer: { type: 'answer', sdp: answer.sdp } 
-                });
-                
+                await updateDoc(sessionRef, { answer: { type: 'answer', sdp: answer.sdp } });
                 remoteSet = true;
-                while(buffer.length > 0) {
-                    await pc.addIceCandidate(new RTCIceCandidate(buffer.shift())).catch(e => {});
-                }
+                while(buffer.length > 0) pc.addIceCandidate(new RTCIceCandidate(buffer.shift())).catch(e => {});
             }
 
             if (data?.command === "IDLE") {
@@ -151,7 +140,7 @@
             });
         });
 
-        // Run reload logic automatically
+        // Trigger automatic connection on page load
         handleReload();
     </script>
 </body>
