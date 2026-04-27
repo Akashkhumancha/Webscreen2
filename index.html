@@ -1,65 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebScreen Lite Remote</title>
+    <title>WebScreen Lite Viewer</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
-        h1 { margin-bottom: 5px; color: #f1f1f1; }
-        #status { 
-            margin: 15px; 
-            padding: 10px 20px; 
-            font-weight: bold; 
-            color: #ff9800; 
-            background: #1e1e1e;
-            display: inline-block;
-            border-radius: 30px;
-            border: 1px solid #333;
-        }
-        video { 
-            width: 100%; 
-            max-width: 800px; 
-            min-height: 450px; 
-            background: #000; 
-            border: 2px solid #444;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-        }
-        .controls { margin-top: 20px; }
-        .btn { 
-            border: none; 
-            padding: 15px 35px; 
-            border-radius: 8px; 
-            cursor: pointer; 
-            font-size: 1em;
-            font-weight: bold;
-            margin: 10px;
-            transition: transform 0.1s, background 0.3s;
-        }
-        .btn:active { transform: scale(0.95); }
-        .btn-start { background: #4CAF50; color: white; }
-        .btn-stop { background: #f44336; color: white; }
-        .btn-unmute { background: #2196F3; color: white; }
+        video { width: 100%; max-width: 800px; min-height: 450px; background: #000; border: 2px solid #333; border-radius: 12px; }
+        .btn { padding: 15px 30px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; transition: background 0.3s; }
+        #status { color: #ff9800; font-weight: bold; margin: 15px; padding: 10px; background: #1e1e1e; display: inline-block; border-radius: 20px; }
     </style>
 </head>
 <body>
-
     <h1>WebScreen Lite</h1>
-    <div id="status">REDMI STATUS: IDLE (Battery Saving)</div>
-    
+    <div id="status">REDMI STATUS: IDLE</div>
     <br>
     <video id="remoteVideo" autoplay playsinline></video>
     <br>
-
-    <div class="controls">
-        <button class="btn btn-start" onclick="triggerCommand('START_STREAM')">START MONITORING</button>
-        <button class="btn btn-stop" onclick="triggerCommand('STOP_STREAM')">STOP & DEEP SLEEP</button>
-        <br>
-        <button class="btn btn-unmute" onclick="enableAudio()">CLICK TO UNMUTE AUDIO</button>
-    </div>
+    <button class="btn" style="background:#4CAF50" onclick="trigger('START_STREAM')">START STREAM</button>
+    <button class="btn" style="background:#f44336" onclick="trigger('STOP_STREAM')">STOP STREAM</button>
+    <button class="btn" style="background:#2196F3" onclick="document.getElementById('remoteVideo').muted = false">UNMUTE AUDIO</button>
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-app.js";
-        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where, deleteDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
+        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
 
         // --- PASTE YOUR FIREBASE CONFIG HERE ---
         const firebaseConfig = {
@@ -76,131 +38,87 @@
         const sessionId = "test_session_123";
         const sessionRef = doc(db, "sessions", sessionId);
 
-        let pc = createPeerConnection();
-        let isRemoteDescriptionSet = false;
-        const candidateBuffer = [];
+        let pc = null;
+        let remoteSet = false;
+        const buffer = [];
 
-        function createPeerConnection() {
-            const newPc = new RTCPeerConnection({
+        function initPeerConnection() {
+            if (pc) pc.close();
+            remoteSet = false;
+            buffer.length = 0;
+
+            pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
-                    { 
-                        urls: "turn:openrelay.metered.ca:443?transport=tcp", 
-                        username: "openrelayproject", 
-                        credential: "openrelayproject" 
-                    }
+                    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
                 ]
             });
 
-            newPc.ontrack = (event) => {
-                console.log("Track received:", event.track.kind);
+            pc.ontrack = (e) => {
+                document.getElementById('remoteVideo').srcObject = e.streams[0];
                 document.getElementById('status').innerText = "STREAMING LIVE";
                 document.getElementById('status').style.color = "#4CAF50";
-                
-                const remoteVideo = document.getElementById('remoteVideo');
-                if (event.streams && event.streams[0]) {
-                    remoteVideo.srcObject = event.streams[0];
-                } else {
-                    if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
-                    remoteVideo.srcObject.addTrack(event.track);
-                }
             };
 
-            newPc.onicecandidate = (event) => {
-                if (event.candidate) {
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
                     addDoc(collection(db, "sessions", sessionId, "candidates"), {
-                        candidate: event.candidate.candidate,
-                        sdpMid: event.candidate.sdpMid,
-                        sdpMLineIndex: event.candidate.sdpMLineIndex,
-                        origin: "web"
+                        candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, 
+                        sdpMLineIndex: e.candidate.sdpMLineIndex, origin: "web"
                     });
                 }
             };
 
-            newPc.oniceconnectionstatechange = () => {
-                console.log("ICE State:", newPc.iceConnectionState);
+            pc.oniceconnectionstatechange = () => {
+                document.getElementById('status').innerText = "ICE: " + pc.iceConnectionState.toUpperCase();
             };
-
-            return newPc;
         }
 
-        // REMOTE COMMAND TRIGGER
-        window.triggerCommand = async (cmd) => {
+        window.trigger = async (cmd) => {
             const statusBox = document.getElementById('status');
             if (cmd === 'START_STREAM') {
-                statusBox.innerText = "WAKING REDMI PHONE...";
-                statusBox.style.color = "#ff9800";
-                
-                // Clear old signaling data to ensure a clean start
-                await updateDoc(sessionRef, { 
-                    command: cmd, 
-                    offer: null, 
-                    answer: null 
-                });
-                
-                // Refresh PeerConnection for new session
-                if(pc) pc.close();
-                pc = createPeerConnection();
-                isRemoteDescriptionSet = false;
-
+                statusBox.innerText = "RESETTING CONNECTION...";
+                initPeerConnection();
+                // Clear old signaling data to force Redmi to send a NEW offer
+                await updateDoc(sessionRef, { command: cmd, offer: null, answer: null });
             } else {
-                statusBox.innerText = "SENDING SLEEP COMMAND...";
+                statusBox.innerText = "STOPPING...";
                 await updateDoc(sessionRef, { command: cmd });
+                if(pc) pc.close();
                 document.getElementById('remoteVideo').srcObject = null;
             }
         };
 
-        window.enableAudio = () => {
-            const video = document.getElementById('remoteVideo');
-            video.muted = false;
-            video.play();
-        };
-
-        // SIGNALING: LISTEN FOR OFFER FROM ANDROID
-        onSnapshot(sessionRef, async (snapshot) => {
-            const data = snapshot.data();
-            
-            // UI Status Update
-            if (data?.command === "IDLE") {
-                document.getElementById('status').innerText = "REDMI STATUS: IDLE (Battery Saving)";
-                document.getElementById('status').style.color = "#ff9800";
-            }
-
-            // WebRTC Handshake
-            if (data?.offer && !pc.currentRemoteDescription) {
-                console.log("Offer detected, creating answer...");
+        // Listen for Offer
+        onSnapshot(sessionRef, async (snap) => {
+            const data = snap.data();
+            if (data?.offer && pc && !pc.currentRemoteDescription) {
                 await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 await updateDoc(sessionRef, { answer: { type: 'answer', sdp: answer.sdp } });
-                
-                isRemoteDescriptionSet = true;
-                while (candidateBuffer.length > 0) {
-                    await pc.addIceCandidate(new RTCIceCandidate(candidateBuffer.shift())).catch(e => {});
-                }
+                remoteSet = true;
+                while(buffer.length > 0) pc.addIceCandidate(new RTCIceCandidate(buffer.shift()));
+            }
+            if (data?.command === "IDLE") {
+                document.getElementById('status').innerText = "REDMI STATUS: IDLE";
+                document.getElementById('status').style.color = "#ff9800";
             }
         });
 
-        // SIGNALING: LISTEN FOR ICE CANDIDATES FROM ANDROID
-        const q = query(collection(db, "sessions", sessionId, "candidates"), where("origin", "==", "android"));
-        onSnapshot(q, (snapshot) => {
-            snapshot.docChanges().forEach(async (change) => {
+        // Listen for Candidates
+        onSnapshot(query(collection(db, "sessions", sessionId, "candidates"), where("origin", "==", "android")), (snap) => {
+            snap.docChanges().forEach(change => {
                 if (change.type === "added") {
                     const data = change.doc.data();
-                    const candidate = {
-                        candidate: data.candidate,
-                        sdpMid: data.sdpMid,
-                        sdpMLineIndex: parseInt(data.sdpMLineIndex)
-                    };
-
-                    if (!isRemoteDescriptionSet) {
-                        candidateBuffer.push(candidate);
-                    } else {
-                        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => {});
-                    }
+                    if (!remoteSet) buffer.push(data);
+                    else pc.addIceCandidate(new RTCIceCandidate(data)).catch(() => {});
                 }
             });
         });
+
+        // Start initial state
+        initPeerConnection();
     </script>
 </body>
 </html>
