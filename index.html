@@ -1,18 +1,20 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebScreen Lite Pro</title>
+    <title>WebScreen Lite Pro Viewer</title>
     <style>
         body { font-family: 'Segoe UI', sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
-        video { width: 100%; max-width: 800px; background: #000; border: 2px solid #444; border-radius: 12px; }
+        video { width: 100%; max-width: 800px; min-height: 450px; background: #000; border: 2px solid #333; border-radius: 12px; }
         .btn { padding: 15px 30px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; }
-        #status { color: #ff9800; font-weight: bold; margin: 15px; display: inline-block; padding: 10px; background: #1e1e1e; border-radius: 20px;}
+        #status { color: #ff9800; font-weight: bold; margin: 15px; padding: 10px; background: #1e1e1e; display: inline-block; border-radius: 20px; }
     </style>
 </head>
 <body>
     <h1>WebScreen Lite</h1>
     <div id="status">INITIALIZING...</div>
+    <br>
     <video id="remoteVideo" autoplay playsinline></video>
+    <br>
     <div class="controls">
         <button class="btn" style="background:#4CAF50; color:white" onclick="trigger('START_STREAM')">START MONITORING</button>
         <button class="btn" style="background:#f44336; color:white" onclick="trigger('STOP_STREAM')">STOP MONITORING</button>
@@ -46,48 +48,57 @@
             if (pc) pc.close();
             remoteSet = false;
             buffer.length = 0;
+
             pc = new RTCPeerConnection({
                 iceServers: [
-                    { urls: "stun:stun.l.google.com:19302" }, 
-                    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-                    { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" }
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
                 ]
             });
-            pc.ontrack = (e) => { 
-                document.getElementById('remoteVideo').srcObject = e.streams[0]; 
+
+            pc.ontrack = (e) => {
+                document.getElementById('remoteVideo').srcObject = e.streams[0];
                 document.getElementById('status').innerText = "STREAMING LIVE";
                 document.getElementById('status').style.color = "#4CAF50";
             };
+
             pc.onicecandidate = (e) => {
-                if (e.candidate) addDoc(collection(db, "sessions", sessionId, "candidates"), {
-                    candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, 
-                    sdpMLineIndex: e.candidate.sdpMLineIndex, origin: "web"
-                });
+                if (e.candidate) {
+                    addDoc(collection(db, "sessions", sessionId, "candidates"), {
+                        candidate: e.candidate.candidate, 
+                        sdpMid: e.candidate.sdpMid, 
+                        sdpMLineIndex: e.candidate.sdpMLineIndex, 
+                        origin: "web"
+                    });
+                }
             };
         }
 
         window.trigger = async (cmd) => {
+            const statusBox = document.getElementById('status');
             if (cmd === 'START_STREAM') {
+                statusBox.innerText = "RESETTING SESSION...";
                 initPeerConnection();
-                await updateDoc(sessionRef, { command: "STOP_STREAM" }); // Force stop first
+                // Kill current session on Android and clear signaling
+                await updateDoc(sessionRef, { command: "STOP_STREAM" });
                 setTimeout(async () => {
                     await updateDoc(sessionRef, { command: "START_STREAM", offer: null, answer: null });
                 }, 1000);
             } else {
+                statusBox.innerText = "STOPPING...";
                 await updateDoc(sessionRef, { command: "STOP_STREAM" });
                 if(pc) pc.close();
-                document.getElementById('remoteVideo').srcObject = null;
             }
         };
 
         async function handleReload() {
             initPeerConnection();
             document.getElementById('status').innerText = "RECONNECTING...";
-            // 1. Tell Redmi to Stop
+            // 1. Force Redmi to Stop current connection
             await updateDoc(sessionRef, { command: "STOP_STREAM" });
-            // 2. Clear Signaling
+            // 2. Wipe signaling data
             await updateDoc(sessionRef, { offer: null, answer: null });
-            // 3. Request fresh start after a delay
+            // 3. Request fresh start after buffer
             setTimeout(async () => {
                 await updateDoc(sessionRef, { command: "START_STREAM" });
             }, 1500);
@@ -95,14 +106,30 @@
 
         onSnapshot(sessionRef, async (snap) => {
             const data = snap.data();
+            
+            // CASE-INSENSITIVE OFFER HANDLING
             if (data?.offer && pc && !pc.currentRemoteDescription) {
-                await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                console.log("Offer detected:", data.offer.type);
+                
+                const offerDesc = new RTCSessionDescription({
+                    type: data.offer.type.toLowerCase(), // Fix for "OFFER" casing
+                    sdp: data.offer.sdp
+                });
+
+                await pc.setRemoteDescription(offerDesc);
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
-                await updateDoc(sessionRef, { answer: { type: 'answer', sdp: answer.sdp } });
+                
+                await updateDoc(sessionRef, { 
+                    answer: { type: 'answer', sdp: answer.sdp } 
+                });
+                
                 remoteSet = true;
-                while(buffer.length > 0) pc.addIceCandidate(new RTCIceCandidate(buffer.shift()));
+                while(buffer.length > 0) {
+                    await pc.addIceCandidate(new RTCIceCandidate(buffer.shift())).catch(e => {});
+                }
             }
+
             if (data?.command === "IDLE") {
                 document.getElementById('status').innerText = "REDMI STATUS: IDLE";
                 document.getElementById('status').style.color = "#ff9800";
@@ -113,11 +140,18 @@
             snap.docChanges().forEach(change => {
                 if (change.type === "added") {
                     const d = change.doc.data();
-                    if (!remoteSet) buffer.push(d); else pc.addIceCandidate(new RTCIceCandidate(d)).catch(()=>{});
+                    const cand = {
+                        candidate: d.candidate,
+                        sdpMid: d.sdpMid,
+                        sdpMLineIndex: d.sdpMLineIndex
+                    };
+                    if (!remoteSet) buffer.push(cand); 
+                    else pc.addIceCandidate(new RTCIceCandidate(cand)).catch(()=>{});
                 }
             });
         });
 
+        // Run reload logic automatically
         handleReload();
     </script>
 </body>
